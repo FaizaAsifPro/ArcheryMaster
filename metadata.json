@@ -1,0 +1,6 @@
+{
+  "name": "Arrow Strike - Archery Challenge",
+  "description": "Master the bow and test your precision in an arrow shooting game with realistic physics, wind mechanics, and multiple difficulty levels.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
