@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useCallback } from 'react';
-import { Arrow, Difficulty, DIFFICULTY_CONFIGS, FloatingText, Particle, Target } from '../types/game';
+import { Arrow, Difficulty, DIFFICULTY_CONFIGS, FloatingText, Particle, Shockwave, Target } from '../types/game';
 import { soundManager } from '../utils/audio';
 
 interface ArcheryCanvasProps {
@@ -26,9 +26,9 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Game internal state stored in refs to avoid React re-render lag in the 60fps loop
+  // Game internal state stored in refs for silky smooth 60fps loop
   const gameStateRef = useRef({
-    bowX: 130,
+    bowX: 135,
     bowY: 380,
     isPulling: false,
     pullStartX: 0,
@@ -44,10 +44,13 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
     activeArrow: null as Arrow | null,
     targets: [] as Target[],
     particles: [] as Particle[],
+    shockwaves: [] as Shockwave[],
     floatingTexts: [] as FloatingText[],
     ambientLeaves: [] as { x: number; y: number; vx: number; vy: number; rot: number; rotSpeed: number; size: number }[],
     flagWave: 0,
     screenShake: 0,
+    stringVibration: 0, // for bowstring snapback oscillation
+    stringVibPhase: 0,
     nextId: 1,
     time: 0,
     roundCompletedTriggered: false,
@@ -59,7 +62,6 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
   const generateNewWind = useCallback(() => {
     const max = config.maxWind;
     if (max <= 0.1) return 0;
-    // Weighted wind
     return Math.round((Math.random() * 2 - 1) * max * 10) / 10;
   }, [config.maxWind]);
 
@@ -86,6 +88,8 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
         type: 'standard',
         pointsMultiplier: 1,
         active: true,
+        recoilX: 0,
+        recoilAngle: 0,
       },
     ];
 
@@ -99,13 +103,15 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
         x: bonusX,
         y: bonusY,
         baseY: bonusY,
-        radius: bonusType === 'apple' ? 18 : 24,
+        radius: bonusType === 'apple' ? 20 : 26,
         speed: config.targetSpeed * 0.8 + 25,
         amplitude: 50,
         phase: Math.PI / 2,
         type: bonusType,
         pointsMultiplier: 1.5,
         active: true,
+        recoilX: 0,
+        recoilAngle: 0,
       });
     }
 
@@ -122,20 +128,21 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
     gameStateRef.current.activeArrow = null;
     gameStateRef.current.floatingTexts = [];
     gameStateRef.current.particles = [];
+    gameStateRef.current.shockwaves = [];
   }, [difficulty, round, setupRoundTargets]);
 
   // Ambient particles (wind leaves)
   useEffect(() => {
     const leaves = [];
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 24; i++) {
       leaves.push({
         x: Math.random() * 1200,
         y: Math.random() * 600,
-        vx: 1 + Math.random() * 2,
+        vx: 1.2 + Math.random() * 2,
         vy: 0.5 + Math.random() * 0.8,
         rot: Math.random() * Math.PI * 2,
-        rotSpeed: (Math.random() - 0.5) * 0.05,
-        size: 3 + Math.random() * 4,
+        rotSpeed: (Math.random() - 0.5) * 0.06,
+        size: 3.5 + Math.random() * 4,
       });
     }
     gameStateRef.current.ambientLeaves = leaves;
@@ -145,19 +152,33 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
   const addParticles = (x: number, y: number, color: string, count: number, shape: 'circle' | 'spark' | 'splinter' = 'circle') => {
     for (let i = 0; i < count; i++) {
       const angle = Math.random() * Math.PI * 2;
-      const speed = 40 + Math.random() * 180;
+      const speed = 50 + Math.random() * 220;
       gameStateRef.current.particles.push({
         x,
         y,
         vx: Math.cos(angle) * speed,
-        vy: Math.sin(angle) * speed - 30,
+        vy: Math.sin(angle) * speed - 40,
         color,
-        radius: 2 + Math.random() * 3,
+        radius: 2.5 + Math.random() * 4,
         life: 0,
-        maxLife: 0.5 + Math.random() * 0.4,
+        maxLife: 0.55 + Math.random() * 0.45,
         shape,
       });
     }
+  };
+
+  // Spawn shockwave ring on impact
+  const addShockwave = (x: number, y: number, color: string, maxRadius: number = 65) => {
+    gameStateRef.current.shockwaves.push({
+      id: gameStateRef.current.nextId++,
+      x,
+      y,
+      radius: 5,
+      maxRadius,
+      color,
+      life: 0,
+      maxLife: 0.45,
+    });
   };
 
   // Add floating feedback text
@@ -169,9 +190,9 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
       x,
       y,
       color,
-      size: 26,
+      size: 28,
       life: 0,
-      maxLife: 1.4,
+      maxLife: 1.5,
     });
   };
 
@@ -188,25 +209,22 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
     const px = (e.clientX - rect.left) * scaleX;
     const py = (e.clientY - rect.top) * scaleY;
 
-    // Bow position
     const bowX = gameStateRef.current.bowX;
     const bowY = gameStateRef.current.bowY;
 
-    // Allow user to click anywhere around the bow or screen
     gameStateRef.current.isPulling = true;
     gameStateRef.current.pullStartX = px;
     gameStateRef.current.pullStartY = py;
     gameStateRef.current.pullCurrentX = px;
     gameStateRef.current.pullCurrentY = py;
 
-    // Calculate initial aim
-    const dx = bowX - px;
-    const dy = bowY - py;
-    const dist = Math.hypot(dx, dy);
-    gameStateRef.current.pullTension = Math.min(1, dist / 140);
-    gameStateRef.current.aimAngle = Math.atan2(bowY - py, bowX - px);
+    const pullVectorX = bowX - px;
+    const pullVectorY = bowY - py;
+    const dist = Math.hypot(pullVectorX, pullVectorY);
+    gameStateRef.current.pullTension = Math.min(1, Math.max(0.1, dist / 150));
+    gameStateRef.current.aimAngle = Math.atan2(pullVectorY, pullVectorX);
 
-    soundManager.playDraw(0.1);
+    soundManager.playDraw(0.15);
   };
 
   // Handle pointer move
@@ -228,22 +246,15 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
     const bowX = gameStateRef.current.bowX;
     const bowY = gameStateRef.current.bowY;
 
-    // User pulls back from bow or drag vector:
-    // If pulling behind the bow (px < bowX), pull distance = distance from (bowX, bowY)
     const pullVectorX = bowX - px;
     const pullVectorY = bowY - py;
     const dist = Math.hypot(pullVectorX, pullVectorY);
 
-    // Max draw distance 160px
-    const tension = Math.min(1, Math.max(0.1, dist / 150));
+    const tension = Math.min(1, Math.max(0.1, dist / 155));
     gameStateRef.current.pullTension = tension;
-
-    // Aim angle is in direction the arrow will fly (opposite of pull)
-    // If pulling back to the left, arrow shoots to the right
     gameStateRef.current.aimAngle = Math.atan2(pullVectorY, pullVectorX);
 
-    // Subtle audio feedback during tension build
-    if (Math.random() < 0.15) {
+    if (Math.random() < 0.18) {
       soundManager.playDraw(tension);
     }
   };
@@ -255,7 +266,6 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
 
     const tension = gameStateRef.current.pullTension;
     if (tension < 0.15) {
-      // Released too weakly, cancel shot
       return;
     }
 
@@ -264,17 +274,18 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
     const angle = gameStateRef.current.aimAngle;
 
     // Arrow release speed depends on tension
-    const baseSpeed = 750 + tension * 650;
+    const baseSpeed = 780 + tension * 680;
     const vx = Math.cos(angle) * baseSpeed;
     const vy = Math.sin(angle) * baseSpeed;
 
+    // Arrow is now noticeably bigger: length 76px (was 56px)
     const newArrow: Arrow = {
       id: gameStateRef.current.nextId++,
-      x: bowX + Math.cos(angle) * 30,
-      y: bowY + Math.sin(angle) * 30,
+      x: bowX + Math.cos(angle) * 35,
+      y: bowY + Math.sin(angle) * 35,
       vx,
       vy,
-      length: 56,
+      length: 76,
       angle,
       isFlying: true,
       isStuck: false,
@@ -282,11 +293,15 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
     };
 
     gameStateRef.current.activeArrow = newArrow;
+    // Trigger bowstring snap-back vibration animation
+    gameStateRef.current.stringVibration = 1.0;
+    gameStateRef.current.stringVibPhase = 0;
+
     onArrowShot();
     soundManager.playRelease();
 
     // Bow recoil shake
-    gameStateRef.current.screenShake = 4;
+    gameStateRef.current.screenShake = 5;
   };
 
   // Main Canvas Animation and Physics Loop
@@ -300,7 +315,7 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
     let lastTime = performance.now();
 
     const loop = (currentTime: number) => {
-      const dt = Math.min(0.04, (currentTime - lastTime) / 1000); // capped delta time
+      const dt = Math.min(0.04, (currentTime - lastTime) / 1000);
       lastTime = currentTime;
 
       const state = gameStateRef.current;
@@ -312,23 +327,43 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
         state.windGustTimer = 0;
         state.targetWind = generateNewWind();
       }
-      // Smoothly interpolate wind
       state.wind += (state.targetWind - state.wind) * dt * 1.5;
 
       // Screen shake decay
       if (state.screenShake > 0) {
-        state.screenShake = Math.max(0, state.screenShake - dt * 18);
+        state.screenShake = Math.max(0, state.screenShake - dt * 20);
+      }
+
+      // Bowstring vibration decay on release
+      if (state.stringVibration > 0) {
+        state.stringVibPhase += dt * 55;
+        state.stringVibration = Math.max(0, state.stringVibration - dt * 4.2);
       }
 
       // Update flag wave
       state.flagWave += dt * (3 + Math.abs(state.wind) * 1.5);
 
-      // --- Update Target Positions ---
+      // --- Update Target Positions and Impact Recoil ---
       state.targets.forEach((target) => {
         if (!target.active) return;
         if (target.speed > 0) {
           target.phase += dt * (target.speed / 50);
           target.y = target.baseY + Math.sin(target.phase) * target.amplitude;
+        }
+        // Smoothly dampen impact recoil
+        if (target.recoilX && target.recoilX > 0) {
+          target.recoilX = Math.max(0, target.recoilX - dt * 50);
+        }
+        if (target.recoilAngle && Math.abs(target.recoilAngle) > 0.001) {
+          target.recoilAngle *= Math.max(0, 1 - dt * 12);
+        }
+      });
+
+      // --- Update Stuck Arrows Quiver Animation ---
+      state.arrows.forEach((arrow) => {
+        if (arrow.isStuck && arrow.quiverAmount && arrow.quiverAmount > 0.001) {
+          arrow.quiverPhase = (arrow.quiverPhase || 0) + dt * 40;
+          arrow.quiverAmount = Math.max(0, arrow.quiverAmount - dt * 0.65);
         }
       });
 
@@ -336,21 +371,18 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
       if (state.activeArrow && state.activeArrow.isFlying) {
         const arrow = state.activeArrow;
 
-        // Physics constants
-        const gravity = 880; // px/s^2
-        const windEffect = state.wind * 28; // horizontal wind acceleration
+        const gravity = 880;
+        const windEffect = state.wind * 28;
 
         arrow.vy += gravity * dt;
         arrow.vx += windEffect * dt;
         arrow.x += arrow.vx * dt;
         arrow.y += arrow.vy * dt;
 
-        // Smoothly orient arrow to velocity vector
         arrow.angle = Math.atan2(arrow.vy, arrow.vx);
 
-        // Record trail
         arrow.trail.push({ x: arrow.x, y: arrow.y, alpha: 1.0 });
-        if (arrow.trail.length > 12) {
+        if (arrow.trail.length > 16) {
           arrow.trail.shift();
         }
 
@@ -359,7 +391,6 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
         for (const target of state.targets) {
           if (!target.active) continue;
 
-          // Target distance to arrow tip
           const tipX = arrow.x;
           const tipY = arrow.y;
 
@@ -367,29 +398,33 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
           const dy = tipY - target.y;
           const distance = Math.hypot(dx, dy);
 
-          // Standard target is tilted slightly; check circular radius
           if (distance <= target.radius) {
             arrowHit = true;
             arrow.isFlying = false;
             arrow.isStuck = true;
             arrow.stuckTargetId = target.id;
             arrow.stuckOffset = { x: dx, y: dy };
+            // Set initial quiver vibration on arrow
+            arrow.quiverAmount = 0.22;
+            arrow.quiverPhase = 0;
             state.arrows.push(arrow);
             state.activeArrow = null;
 
-            // Determine score based on target type and concentric ring
+            // Target recoil kick
+            target.recoilX = 14;
+            target.recoilAngle = 0.12;
+
             if (target.type === 'apple' || target.type === 'balloon') {
-              // Bonus target hit!
               target.active = false;
               const bonusScore = Math.round(75 * (1 + streak * 0.2));
               onScoreEarned(bonusScore, 'bonus');
               soundManager.playHit('bonus');
-              addParticles(target.x, target.y, target.type === 'apple' ? '#ef4444' : '#38bdf8', 35, 'spark');
+              addParticles(target.x, target.y, target.type === 'apple' ? '#ef4444' : '#38bdf8', 40, 'spark');
+              addShockwave(target.x, target.y, target.type === 'apple' ? '#f59e0b' : '#38bdf8', 85);
               addFloatingText(`BONUS! +${bonusScore}`, target.x, target.y - 30, '#facc15', target.type === 'apple' ? 'Golden Apple!' : 'Balloon Pop!');
-              state.screenShake = 6;
+              state.screenShake = 7;
             } else {
-              // Standard Target Rings Calculation
-              const normalizedDist = distance / target.radius; // 0 (dead center) to 1.0 (outer edge)
+              const normalizedDist = distance / target.radius;
 
               let ringScore = 10;
               let hitType: 'bullseye' | 'hit' | 'outer' = 'outer';
@@ -397,56 +432,53 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
               let textColor = '#ffffff';
 
               if (normalizedDist <= 0.18) {
-                // Perfect Bullseye!
                 ringScore = 100;
                 hitType = 'bullseye';
                 ringName = 'PERFECT BULLSEYE!';
                 textColor = '#facc15';
-                addParticles(tipX, tipY, '#facc15', 45, 'spark');
-                state.screenShake = 9;
+                addParticles(tipX, tipY, '#facc15', 55, 'spark');
+                addShockwave(tipX, tipY, '#facc15', 95);
+                state.screenShake = 10;
               } else if (normalizedDist <= 0.38) {
-                // Inner Yellow Bullseye
                 ringScore = 60;
                 hitType = 'bullseye';
                 ringName = 'BULLSEYE!';
                 textColor = '#fef08a';
-                addParticles(tipX, tipY, '#fde047', 30, 'spark');
-                state.screenShake = 6;
+                addParticles(tipX, tipY, '#fde047', 35, 'spark');
+                addShockwave(tipX, tipY, '#fde047', 75);
+                state.screenShake = 7;
               } else if (normalizedDist <= 0.58) {
-                // Red Ring
                 ringScore = 40;
                 hitType = 'hit';
                 ringName = 'RED RING +40';
                 textColor = '#f87171';
-                addParticles(tipX, tipY, '#dc2626', 20, 'splinter');
-                state.screenShake = 4;
+                addParticles(tipX, tipY, '#dc2626', 25, 'splinter');
+                addShockwave(tipX, tipY, '#ef4444', 55);
+                state.screenShake = 5;
               } else if (normalizedDist <= 0.78) {
-                // Blue Ring
                 ringScore = 25;
                 hitType = 'hit';
                 ringName = 'BLUE RING +25';
                 textColor = '#60a5fa';
-                addParticles(tipX, tipY, '#2563eb', 15, 'splinter');
-                state.screenShake = 3;
+                addParticles(tipX, tipY, '#2563eb', 18, 'splinter');
+                addShockwave(tipX, tipY, '#3b82f6', 45);
+                state.screenShake = 4;
               } else if (normalizedDist <= 0.92) {
-                // Black Ring
                 ringScore = 15;
                 hitType = 'outer';
                 ringName = 'BLACK RING +15';
                 textColor = '#9ca3af';
-                addParticles(tipX, tipY, '#475569', 12, 'splinter');
-                state.screenShake = 2;
+                addParticles(tipX, tipY, '#475569', 14, 'splinter');
+                state.screenShake = 3;
               } else {
-                // Outer White Ring
                 ringScore = 10;
                 hitType = 'outer';
                 ringName = 'WHITE RING +10';
                 textColor = '#f3f4f6';
-                addParticles(tipX, tipY, '#94a3b8', 10, 'splinter');
+                addParticles(tipX, tipY, '#94a3b8', 12, 'splinter');
                 state.screenShake = 2;
               }
 
-              // Apply combo multiplier
               const multiplier = streak > 0 ? 1 + streak * 0.25 : 1;
               const finalPoints = Math.round(ringScore * multiplier);
 
@@ -464,19 +496,20 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
         // --- Ground or Wall Collision ---
         const groundY = canvas.height * 0.88;
         if (!arrowHit && arrow.y >= groundY) {
-          // Stuck in dirt
           arrow.isFlying = false;
           arrow.isStuck = true;
           arrow.y = groundY;
+          arrow.quiverAmount = 0.18;
+          arrow.quiverPhase = 0;
           state.arrows.push(arrow);
           state.activeArrow = null;
 
           onScoreEarned(0, 'miss');
           soundManager.playHit('miss');
-          addParticles(arrow.x, arrow.y, '#78350f', 12, 'splinter');
+          addParticles(arrow.x, arrow.y, '#78350f', 16, 'splinter');
+          addShockwave(arrow.x, arrow.y, '#78350f', 35);
           addFloatingText('MISS!', arrow.x, arrow.y - 20, '#ef4444');
         } else if (!arrowHit && (arrow.x > canvas.width + 50 || arrow.y < -300)) {
-          // Flew off screen
           state.activeArrow = null;
           onScoreEarned(0, 'miss');
           soundManager.playHit('miss');
@@ -484,12 +517,22 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
         }
       }
 
-      // Check if all arrows fired and no arrow is flying -> trigger round complete
+      // Check if round complete
       if (arrowsRemaining <= 0 && !state.activeArrow && !state.roundCompletedTriggered) {
         state.roundCompletedTriggered = true;
         setTimeout(() => {
           onRoundComplete();
         }, 1200);
+      }
+
+      // --- Update Shockwaves ---
+      for (let i = state.shockwaves.length - 1; i >= 0; i--) {
+        const sw = state.shockwaves[i];
+        sw.life += dt;
+        sw.radius = (sw.life / sw.maxLife) * sw.maxRadius;
+        if (sw.life >= sw.maxLife) {
+          state.shockwaves.splice(i, 1);
+        }
       }
 
       // --- Update Particles ---
@@ -498,7 +541,7 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
         p.life += dt;
         p.x += p.vx * dt;
         p.y += p.vy * dt;
-        p.vy += 220 * dt; // slight gravity
+        p.vy += 220 * dt;
         if (p.life >= p.maxLife) {
           state.particles.splice(i, 1);
         }
@@ -508,7 +551,7 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
       for (let i = state.floatingTexts.length - 1; i >= 0; i--) {
         const t = state.floatingTexts[i];
         t.life += dt;
-        t.y -= 40 * dt; // float upwards
+        t.y -= 40 * dt;
         if (t.life >= t.maxLife) {
           state.floatingTexts.splice(i, 1);
         }
@@ -538,10 +581,10 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
 
       // Clear & Background Sky
       const skyGrad = ctx.createLinearGradient(0, 0, 0, canvas.height);
-      skyGrad.addColorStop(0, '#38bdf8'); // sky blue
+      skyGrad.addColorStop(0, '#38bdf8');
       skyGrad.addColorStop(0.5, '#bae6fd');
-      skyGrad.addColorStop(0.75, '#fef08a'); // golden warm horizon
-      skyGrad.addColorStop(1, '#86efac'); // grass transition
+      skyGrad.addColorStop(0.75, '#fef08a');
+      skyGrad.addColorStop(1, '#86efac');
       ctx.fillStyle = skyGrad;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -578,7 +621,7 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
 
       // Grass Ground
       const groundGrad = ctx.createLinearGradient(0, canvas.height * 0.75, 0, canvas.height);
-      groundGrad.addColorStop(0, '#22c55e'); // vibrant grass
+      groundGrad.addColorStop(0, '#22c55e');
       groundGrad.addColorStop(0.2, '#16a34a');
       groundGrad.addColorStop(1, '#15803d');
       ctx.fillStyle = groundGrad;
@@ -595,7 +638,6 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
           ctx.lineTo(lineX + 35, groundY + 12);
           ctx.stroke();
 
-          // Distance label in grass
           ctx.fillStyle = '#f0fdf4';
           ctx.font = '11px sans-serif';
           ctx.textAlign = 'center';
@@ -608,7 +650,6 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
       const flagX = 65;
       const flagPoleTop = canvas.height * 0.42;
       const flagPoleBottom = canvas.height * 0.82;
-      // Pole
       ctx.strokeStyle = '#475569';
       ctx.lineWidth = 4;
       ctx.beginPath();
@@ -616,30 +657,29 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
       ctx.lineTo(flagX, flagPoleTop);
       ctx.stroke();
 
-      // Fluttering triangular wind pennant
       const flagDir = state.wind >= 0 ? 1 : -1;
       const flagSpeedMagnitude = Math.abs(state.wind);
-      const flagLength = Math.max(25, Math.min(65, 25 + flagSpeedMagnitude * 4));
-      const waveOffset = Math.sin(state.flagWave) * (4 + flagSpeedMagnitude);
+      const flagLength = Math.max(28, Math.min(68, 28 + flagSpeedMagnitude * 4));
+      const waveOffset = Math.sin(state.flagWave) * (5 + flagSpeedMagnitude);
 
       ctx.fillStyle = flagSpeedMagnitude > 7 ? '#ef4444' : flagSpeedMagnitude > 3 ? '#eab308' : '#22c55e';
       ctx.beginPath();
       ctx.moveTo(flagX, flagPoleTop);
-      ctx.lineTo(flagX + flagLength * flagDir, flagPoleTop + 10 + waveOffset);
-      ctx.lineTo(flagX, flagPoleTop + 24);
+      ctx.lineTo(flagX + flagLength * flagDir, flagPoleTop + 12 + waveOffset);
+      ctx.lineTo(flagX, flagPoleTop + 26);
       ctx.closePath();
       ctx.fill();
 
       // Flag pole gold topper
       ctx.fillStyle = '#fbbf24';
       ctx.beginPath();
-      ctx.arc(flagX, flagPoleTop - 2, 4, 0, Math.PI * 2);
+      ctx.arc(flagX, flagPoleTop - 2, 4.5, 0, Math.PI * 2);
       ctx.fill();
 
       // Shooting platform / mat
       ctx.fillStyle = '#3f3f46';
       ctx.beginPath();
-      ctx.ellipse(state.bowX - 10, groundY - 6, 70, 16, 0, 0, Math.PI * 2);
+      ctx.ellipse(state.bowX - 10, groundY - 6, 75, 17, 0, 0, Math.PI * 2);
       ctx.fill();
       ctx.strokeStyle = '#e4e4e7';
       ctx.lineWidth = 2;
@@ -647,18 +687,17 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
 
       // Quiver with arrows sitting on the ground
       ctx.fillStyle = '#78350f';
-      ctx.fillRect(state.bowX - 55, groundY - 45, 18, 40);
+      ctx.fillRect(state.bowX - 58, groundY - 48, 20, 44);
       ctx.fillStyle = '#b45309';
-      ctx.fillRect(state.bowX - 57, groundY - 48, 22, 6);
-      // Fletchings sticking out of quiver
+      ctx.fillRect(state.bowX - 60, groundY - 51, 24, 7);
       const quiverArrows = Math.min(8, arrowsRemaining);
       for (let i = 0; i < quiverArrows; i++) {
-        const qx = state.bowX - 52 + (i % 3) * 6;
-        const qy = groundY - 55 - (i * 3);
+        const qx = state.bowX - 55 + (i % 3) * 7;
+        const qy = groundY - 60 - (i * 3.5);
         ctx.strokeStyle = '#f59e0b';
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 2.5;
         ctx.beginPath();
-        ctx.moveTo(qx, groundY - 45);
+        ctx.moveTo(qx, groundY - 48);
         ctx.lineTo(qx + (i - 2) * 2, qy);
         ctx.stroke();
       }
@@ -679,18 +718,20 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
       state.targets.forEach((target) => {
         if (!target.active) return;
 
-        if (target.type === 'apple') {
-          // Golden/Red Bonus Apple
-          ctx.save();
-          ctx.translate(target.x, target.y);
+        const recoilX = target.recoilX || 0;
+        const recoilAngle = target.recoilAngle || 0;
 
-          // Shadow below apple
-          ctx.fillStyle = 'rgba(0,0,0,0.18)';
+        ctx.save();
+        ctx.translate(target.x + recoilX, target.y);
+        ctx.rotate(recoilAngle);
+
+        if (target.type === 'apple') {
+          // Apple Body
+          ctx.fillStyle = 'rgba(0,0,0,0.2)';
           ctx.beginPath();
-          ctx.ellipse(0, 40, target.radius * 0.8, 6, 0, 0, Math.PI * 2);
+          ctx.ellipse(0, 42, target.radius * 0.85, 7, 0, 0, Math.PI * 2);
           ctx.fill();
 
-          // Apple Body
           const appleGrad = ctx.createRadialGradient(-4, -4, 2, 0, 0, target.radius);
           appleGrad.addColorStop(0, '#fef08a');
           appleGrad.addColorStop(0.3, '#f59e0b');
@@ -699,7 +740,7 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
           ctx.beginPath();
           ctx.arc(0, 0, target.radius, 0, Math.PI * 2);
           ctx.fill();
-          ctx.lineWidth = 2;
+          ctx.lineWidth = 2.5;
           ctx.strokeStyle = '#b91c1c';
           ctx.stroke();
 
@@ -713,13 +754,13 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
 
           ctx.fillStyle = '#22c55e';
           ctx.beginPath();
-          ctx.ellipse(6, -target.radius - 5, 6, 3, Math.PI / 4, 0, Math.PI * 2);
+          ctx.ellipse(6, -target.radius - 5, 7, 3.5, Math.PI / 4, 0, Math.PI * 2);
           ctx.fill();
 
           // Sparkle glint
           ctx.fillStyle = '#ffffff';
           ctx.beginPath();
-          ctx.arc(-target.radius * 0.35, -target.radius * 0.35, 4, 0, Math.PI * 2);
+          ctx.arc(-target.radius * 0.35, -target.radius * 0.35, 4.5, 0, Math.PI * 2);
           ctx.fill();
 
           ctx.restore();
@@ -727,34 +768,29 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
         }
 
         if (target.type === 'balloon') {
-          // Floating Sky Balloon
-          ctx.save();
-          ctx.translate(target.x, target.y);
-
-          // Balloon body
+          // Balloon Body
           const balloonGrad = ctx.createRadialGradient(-6, -8, 3, 0, 0, target.radius);
           balloonGrad.addColorStop(0, '#bae6fd');
           balloonGrad.addColorStop(0.4, '#38bdf8');
           balloonGrad.addColorStop(1, '#0284c7');
           ctx.fillStyle = balloonGrad;
           ctx.beginPath();
-          ctx.ellipse(0, 0, target.radius * 0.85, target.radius, 0, 0, Math.PI * 2);
+          ctx.ellipse(0, 0, target.radius * 0.88, target.radius, 0, 0, Math.PI * 2);
           ctx.fill();
 
-          // Balloon knot & string
           ctx.fillStyle = '#0369a1';
           ctx.beginPath();
-          ctx.moveTo(-3, target.radius);
-          ctx.lineTo(3, target.radius);
-          ctx.lineTo(0, target.radius + 4);
+          ctx.moveTo(-4, target.radius);
+          ctx.lineTo(4, target.radius);
+          ctx.lineTo(0, target.radius + 5);
           ctx.closePath();
           ctx.fill();
 
-          ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
-          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.65)';
+          ctx.lineWidth = 2;
           ctx.beginPath();
-          ctx.moveTo(0, target.radius + 4);
-          ctx.quadraticCurveTo(4, target.radius + 20, -2, target.radius + 35);
+          ctx.moveTo(0, target.radius + 5);
+          ctx.quadraticCurveTo(5, target.radius + 22, -2, target.radius + 38);
           ctx.stroke();
 
           ctx.restore();
@@ -762,44 +798,44 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
         }
 
         // Standard Archery Target Stand (Wood tripod easel)
-        const easelY = target.y;
-        const easelGroundY = groundY;
+        const easelY = 0;
+        const easelGroundY = groundY - target.y;
 
         ctx.strokeStyle = '#573315';
-        ctx.lineWidth = 5;
+        ctx.lineWidth = 6;
 
         // Front left leg
         ctx.beginPath();
-        ctx.moveTo(target.x - 4, easelY);
-        ctx.lineTo(target.x - 22, easelGroundY);
+        ctx.moveTo(-5, easelY);
+        ctx.lineTo(-24, easelGroundY);
         ctx.stroke();
 
         // Front right leg
         ctx.beginPath();
-        ctx.moveTo(target.x + 4, easelY);
-        ctx.lineTo(target.x + 22, easelGroundY);
+        ctx.moveTo(5, easelY);
+        ctx.lineTo(24, easelGroundY);
         ctx.stroke();
 
         // Back support leg
         ctx.strokeStyle = '#3d230d';
-        ctx.lineWidth = 4;
+        ctx.lineWidth = 5;
         ctx.beginPath();
-        ctx.moveTo(target.x, easelY - 10);
-        ctx.lineTo(target.x + 12, easelGroundY - 8);
+        ctx.moveTo(0, easelY - 12);
+        ctx.lineTo(14, easelGroundY - 8);
         ctx.stroke();
 
         // Crossbar
         ctx.strokeStyle = '#713f12';
-        ctx.lineWidth = 4;
+        ctx.lineWidth = 5;
         ctx.beginPath();
-        ctx.moveTo(target.x - 20, easelY + 35);
-        ctx.lineTo(target.x + 20, easelY + 35);
+        ctx.moveTo(-22, easelY + 38);
+        ctx.lineTo(22, easelY + 38);
         ctx.stroke();
 
         // Target Board Shadow on Ground
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.22)';
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
         ctx.beginPath();
-        ctx.ellipse(target.x, easelGroundY - 2, target.radius * 0.85, 9, 0, 0, Math.PI * 2);
+        ctx.ellipse(0, easelGroundY - 2, target.radius * 0.9, 10, 0, 0, Math.PI * 2);
         ctx.fill();
 
         // Target Board (Concentric Circles)
@@ -808,25 +844,25 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
         // Wooden back rim
         ctx.fillStyle = '#a16207';
         ctx.beginPath();
-        ctx.arc(target.x, target.y, r + 4, 0, Math.PI * 2);
+        ctx.arc(0, 0, r + 5, 0, Math.PI * 2);
         ctx.fill();
         ctx.strokeStyle = '#451a03';
-        ctx.lineWidth = 3;
+        ctx.lineWidth = 3.5;
         ctx.stroke();
 
         // Ring 1 (Outer White) 10 pts
         ctx.fillStyle = '#f8fafc';
         ctx.beginPath();
-        ctx.arc(target.x, target.y, r, 0, Math.PI * 2);
+        ctx.arc(0, 0, r, 0, Math.PI * 2);
         ctx.fill();
         ctx.strokeStyle = '#94a3b8';
-        ctx.lineWidth = 1;
+        ctx.lineWidth = 1.5;
         ctx.stroke();
 
         // Ring 2 (Black) 15 pts
         ctx.fillStyle = '#1e293b';
         ctx.beginPath();
-        ctx.arc(target.x, target.y, r * 0.82, 0, Math.PI * 2);
+        ctx.arc(0, 0, r * 0.82, 0, Math.PI * 2);
         ctx.fill();
         ctx.strokeStyle = '#475569';
         ctx.stroke();
@@ -834,7 +870,7 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
         // Ring 3 (Blue) 25 pts
         ctx.fillStyle = '#2563eb';
         ctx.beginPath();
-        ctx.arc(target.x, target.y, r * 0.62, 0, Math.PI * 2);
+        ctx.arc(0, 0, r * 0.62, 0, Math.PI * 2);
         ctx.fill();
         ctx.strokeStyle = '#1d4ed8';
         ctx.stroke();
@@ -842,7 +878,7 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
         // Ring 4 (Red) 40 pts
         ctx.fillStyle = '#dc2626';
         ctx.beginPath();
-        ctx.arc(target.x, target.y, r * 0.42, 0, Math.PI * 2);
+        ctx.arc(0, 0, r * 0.42, 0, Math.PI * 2);
         ctx.fill();
         ctx.strokeStyle = '#b91c1c';
         ctx.stroke();
@@ -850,7 +886,7 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
         // Ring 5 (Yellow - Gold Bullseye) 60 pts
         ctx.fillStyle = '#eab308';
         ctx.beginPath();
-        ctx.arc(target.x, target.y, r * 0.22, 0, Math.PI * 2);
+        ctx.arc(0, 0, r * 0.22, 0, Math.PI * 2);
         ctx.fill();
         ctx.strokeStyle = '#ca8a04';
         ctx.stroke();
@@ -858,31 +894,165 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
         // Inner X-Ring (Dead Center Bullseye) 100 pts
         ctx.fillStyle = '#facc15';
         ctx.beginPath();
-        ctx.arc(target.x, target.y, r * 0.1, 0, Math.PI * 2);
+        ctx.arc(0, 0, r * 0.1, 0, Math.PI * 2);
         ctx.fill();
 
-        // Tiny crosshair in center
-        ctx.strokeStyle = 'rgba(0,0,0,0.45)';
-        ctx.lineWidth = 1;
+        // Crosshair
+        ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+        ctx.lineWidth = 1.2;
         ctx.beginPath();
-        ctx.moveTo(target.x - 4, target.y);
-        ctx.lineTo(target.x + 4, target.y);
-        ctx.moveTo(target.x, target.y - 4);
-        ctx.lineTo(target.x, target.y + 4);
+        ctx.moveTo(-5, 0);
+        ctx.lineTo(5, 0);
+        ctx.moveTo(0, -5);
+        ctx.lineTo(0, 5);
         ctx.stroke();
+
+        ctx.restore();
       });
 
-      // --- Draw Stuck Arrows on Targets/Ground ---
+      // --- Draw Shockwaves ---
+      state.shockwaves.forEach((sw) => {
+        const progress = sw.life / sw.maxLife;
+        const alpha = Math.max(0, 1 - progress);
+        ctx.save();
+        ctx.strokeStyle = sw.color;
+        ctx.lineWidth = 3.5 * alpha;
+        ctx.globalAlpha = alpha * 0.85;
+        ctx.beginPath();
+        ctx.arc(sw.x, sw.y, sw.radius, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      });
+
+      // --- Helper to Render High-Detail Larger Arrow ---
+      const drawArrowObject = (arrowLength: number, isStuck: boolean = false, quiverOffset: number = 0) => {
+        ctx.save();
+        if (quiverOffset !== 0) {
+          ctx.rotate(quiverOffset);
+        }
+
+        // Drop shadow for crisp visibility
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.45)';
+        ctx.shadowBlur = 4;
+        ctx.shadowOffsetY = 2;
+
+        // Steel Broadhead Arrowhead (Bigger, sleek triangular tip with metal shine)
+        const headLength = 22;
+        const headWidth = 6.5;
+
+        // Blade Fill
+        ctx.fillStyle = '#cbd5e1';
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(-headLength, -headWidth);
+        ctx.lineTo(-headLength + 5, 0);
+        ctx.lineTo(-headLength, headWidth);
+        ctx.closePath();
+        ctx.fill();
+
+        // Edge highlight & outline
+        ctx.strokeStyle = '#334155';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        // Blade center rib line
+        ctx.strokeStyle = '#94a3b8';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(-headLength + 4, 0);
+        ctx.stroke();
+
+        // Steel Ferrule / Collar
+        ctx.fillStyle = '#64748b';
+        ctx.fillRect(-headLength + 2, -3.2, 5, 6.4);
+
+        // Substantial Wooden Shaft (Bigger: width 5.5px)
+        const shaftStart = -headLength + 6;
+        const shaftEnd = -arrowLength;
+        const shaftW = 5.5;
+
+        // Dark shaft outline
+        ctx.fillStyle = '#1c1917';
+        ctx.fillRect(shaftStart, -shaftW / 2 - 0.75, shaftEnd - shaftStart, shaftW + 1.5);
+
+        // Wood grain body
+        const shaftGrad = ctx.createLinearGradient(0, -shaftW / 2, 0, shaftW / 2);
+        shaftGrad.addColorStop(0, '#f59e0b');
+        shaftGrad.addColorStop(0.4, '#d97706');
+        shaftGrad.addColorStop(1, '#92400e');
+        ctx.fillStyle = shaftGrad;
+        ctx.fillRect(shaftStart, -shaftW / 2, shaftEnd - shaftStart, shaftW);
+
+        // Fletching Feathers (Bigger & Dual-tone: Red & Golden-Yellow with notch lines)
+        const fletchLen = 22;
+        const fletchHeight = 10;
+        const fletchStart = shaftEnd + 26;
+
+        // Top Feather (Crimson Red)
+        ctx.fillStyle = '#ef4444';
+        ctx.beginPath();
+        ctx.moveTo(fletchStart, -shaftW / 2);
+        ctx.lineTo(fletchStart - 8, -shaftW / 2 - fletchHeight);
+        ctx.lineTo(fletchStart - fletchLen, -shaftW / 2 - fletchHeight);
+        ctx.lineTo(fletchStart - fletchLen + 4, -shaftW / 2);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = '#991b1b';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Top Feather feather accent stripe
+        ctx.fillStyle = '#fef08a';
+        ctx.beginPath();
+        ctx.moveTo(fletchStart - 10, -shaftW / 2);
+        ctx.lineTo(fletchStart - 13, -shaftW / 2 - fletchHeight * 0.7);
+        ctx.lineTo(fletchStart - 16, -shaftW / 2 - fletchHeight * 0.7);
+        ctx.lineTo(fletchStart - 13, -shaftW / 2);
+        ctx.closePath();
+        ctx.fill();
+
+        // Bottom Feather (Vivid Golden Orange / White)
+        ctx.fillStyle = '#fbbf24';
+        ctx.beginPath();
+        ctx.moveTo(fletchStart, shaftW / 2);
+        ctx.lineTo(fletchStart - 8, shaftW / 2 + fletchHeight);
+        ctx.lineTo(fletchStart - fletchLen, shaftW / 2 + fletchHeight);
+        ctx.lineTo(fletchStart - fletchLen + 4, shaftW / 2);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = '#b45309';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Bottom Feather accent
+        ctx.fillStyle = '#ef4444';
+        ctx.beginPath();
+        ctx.moveTo(fletchStart - 10, shaftW / 2);
+        ctx.lineTo(fletchStart - 13, shaftW / 2 + fletchHeight * 0.7);
+        ctx.lineTo(fletchStart - 16, shaftW / 2 + fletchHeight * 0.7);
+        ctx.lineTo(fletchStart - 13, shaftW / 2);
+        ctx.closePath();
+        ctx.fill();
+
+        // Nock (Arrow back notch)
+        ctx.fillStyle = '#0f172a';
+        ctx.fillRect(shaftEnd - 4, -2.5, 4, 5);
+
+        ctx.restore();
+      };
+
+      // --- Draw Stuck Arrows on Targets/Ground with Quiver Animation ---
       state.arrows.forEach((arrow) => {
         ctx.save();
         let ax = arrow.x;
         let ay = arrow.y;
 
-        // If stuck on a moving target, move with target
         if (arrow.stuckTargetId && arrow.stuckOffset) {
           const target = state.targets.find((t) => t.id === arrow.stuckTargetId);
           if (target && target.active) {
-            ax = target.x + arrow.stuckOffset.x;
+            const recoilX = target.recoilX || 0;
+            ax = target.x + recoilX + arrow.stuckOffset.x;
             ay = target.y + arrow.stuckOffset.y;
           }
         }
@@ -890,48 +1060,37 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
         ctx.translate(ax, ay);
         ctx.rotate(arrow.angle);
 
-        // Arrow Shaft (Wood)
-        ctx.strokeStyle = '#d97706';
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.moveTo(0, 0);
-        ctx.lineTo(-arrow.length * 0.75, 0);
-        ctx.stroke();
-
-        // Arrow Fletching Feathers
-        const fletchStart = -arrow.length * 0.75;
-        ctx.fillStyle = '#dc2626';
-        ctx.beginPath();
-        ctx.moveTo(fletchStart, 0);
-        ctx.lineTo(fletchStart - 8, -5);
-        ctx.lineTo(fletchStart - 14, -5);
-        ctx.lineTo(fletchStart - 8, 0);
-        ctx.closePath();
-        ctx.fill();
-
-        ctx.beginPath();
-        ctx.moveTo(fletchStart, 0);
-        ctx.lineTo(fletchStart - 8, 5);
-        ctx.lineTo(fletchStart - 14, 5);
-        ctx.lineTo(fletchStart - 8, 0);
-        ctx.closePath();
-        ctx.fill();
+        // Arrow Quiver wobble
+        const quiverAngle = (arrow.quiverAmount || 0) * Math.sin(arrow.quiverPhase || 0);
+        drawArrowObject(arrow.length, true, quiverAngle);
 
         ctx.restore();
       });
 
-      // --- Draw Active In-Flight Arrow ---
+      // --- Draw Active In-Flight Arrow with Dynamic Motion Ribbon ---
       if (state.activeArrow && state.activeArrow.isFlying) {
         const arrow = state.activeArrow;
 
-        // Arrow Trail (Whistle effect / motion blur)
+        // Flowing Motion Ribbon / Air stream trail
         if (arrow.trail.length > 1) {
           for (let i = 0; i < arrow.trail.length - 1; i++) {
             const p1 = arrow.trail[i];
             const p2 = arrow.trail[i + 1];
-            const alpha = (i / arrow.trail.length) * 0.45;
-            ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
-            ctx.lineWidth = 2;
+            const progress = i / arrow.trail.length;
+            const alpha = progress * 0.65;
+            const width = 1 + progress * 4.5;
+
+            ctx.strokeStyle = `rgba(250, 204, 21, ${alpha})`;
+            ctx.lineWidth = width;
+            ctx.lineCap = 'round';
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p1.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.stroke();
+
+            // Inner bright core
+            ctx.strokeStyle = `rgba(255, 255, 255, ${alpha * 0.9})`;
+            ctx.lineWidth = width * 0.4;
             ctx.beginPath();
             ctx.moveTo(p1.x, p1.y);
             ctx.lineTo(p2.x, p2.y);
@@ -943,61 +1102,18 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
         ctx.translate(arrow.x, arrow.y);
         ctx.rotate(arrow.angle);
 
-        // Steel Arrowhead
-        ctx.fillStyle = '#94a3b8';
-        ctx.beginPath();
-        ctx.moveTo(0, 0);
-        ctx.lineTo(-12, -4);
-        ctx.lineTo(-8, 0);
-        ctx.lineTo(-12, 4);
-        ctx.closePath();
-        ctx.fill();
-        ctx.strokeStyle = '#475569';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-
-        // Wooden Shaft
-        ctx.strokeStyle = '#d97706';
-        ctx.lineWidth = 3.5;
-        ctx.beginPath();
-        ctx.moveTo(-8, 0);
-        ctx.lineTo(-arrow.length, 0);
-        ctx.stroke();
-
-        // Dual Fletching (Red & White Feathers)
-        const fletchStart = -arrow.length + 18;
-        ctx.fillStyle = '#ef4444';
-        ctx.beginPath();
-        ctx.moveTo(fletchStart, 0);
-        ctx.lineTo(fletchStart - 12, -7);
-        ctx.lineTo(fletchStart - 18, -7);
-        ctx.lineTo(fletchStart - 12, 0);
-        ctx.closePath();
-        ctx.fill();
-
-        ctx.fillStyle = '#ffffff';
-        ctx.beginPath();
-        ctx.moveTo(fletchStart, 0);
-        ctx.lineTo(fletchStart - 12, 7);
-        ctx.lineTo(fletchStart - 18, 7);
-        ctx.lineTo(fletchStart - 12, 0);
-        ctx.closePath();
-        ctx.fill();
-
-        // Nock
-        ctx.fillStyle = '#1e293b';
-        ctx.fillRect(-arrow.length - 2, -2, 3, 4);
+        drawArrowObject(arrow.length, false, 0);
 
         ctx.restore();
       }
 
-      // --- Draw Trajectory Prediction Guide (when pulling) ---
+      // --- HIGH VISIBILITY TRAJECTORY PREDICTION GUIDE (ANIMATED & CONTRASTED) ---
       if (state.isPulling && state.pullTension > 0.15) {
         const tension = state.pullTension;
         const angle = state.aimAngle;
-        const baseSpeed = 750 + tension * 650;
-        let simX = state.bowX + Math.cos(angle) * 30;
-        let simY = state.bowY + Math.sin(angle) * 30;
+        const baseSpeed = 780 + tension * 680;
+        let simX = state.bowX + Math.cos(angle) * 35;
+        let simY = state.bowY + Math.sin(angle) * 35;
         let simVx = Math.cos(angle) * baseSpeed;
         let simVy = Math.sin(angle) * baseSpeed;
 
@@ -1006,106 +1122,192 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
         const gravity = 880;
         const windEffect = state.wind * 28;
 
+        let endX = simX;
+        let endY = simY;
+
+        // Animated marching offset
+        const marchingOffset = (state.time * 28) % 4;
+
         for (let step = 0; step < maxSteps; step++) {
           simVy += gravity * simDt;
           simVx += windEffect * simDt;
           simX += simVx * simDt;
           simY += simVy * simDt;
 
-          if (simY > groundY || simX > canvas.width) break;
+          if (simY > groundY || simX > canvas.width) {
+            endX = simX;
+            endY = simY;
+            break;
+          }
+          endX = simX;
+          endY = simY;
 
-          const dotAlpha = (1 - step / maxSteps) * 0.75;
-          ctx.fillStyle = step % 4 === 0 ? `rgba(250, 204, 21, ${dotAlpha})` : `rgba(255, 255, 255, ${dotAlpha})`;
+          const progress = step / maxSteps;
+          const fadeAlpha = 1 - progress * 0.7;
+
+          // Pulse effect based on marching animation
+          const pulseIndex = (step + marchingOffset) % 4;
+          const isPulsing = pulseIndex < 1.5;
+          const dotRadius = isPulsing ? 5.8 : 4.5;
+
+          // High visibility dual-layer dots:
+          // 1. Dark outer border for strong contrast against bright sky and clouds
+          ctx.fillStyle = `rgba(15, 23, 42, ${fadeAlpha * 0.95})`;
           ctx.beginPath();
-          ctx.arc(simX, simY, 2.8, 0, Math.PI * 2);
+          ctx.arc(simX, simY, dotRadius + 1.8, 0, Math.PI * 2);
+          ctx.fill();
+
+          // 2. High-intensity glowing yellow-amber core
+          const coreColor = isPulsing
+            ? `rgba(254, 240, 138, ${fadeAlpha})` // bright lemon
+            : `rgba(245, 158, 11, ${fadeAlpha})`; // deep amber
+          ctx.fillStyle = coreColor;
+          ctx.beginPath();
+          ctx.arc(simX, simY, dotRadius, 0, Math.PI * 2);
+          ctx.fill();
+
+          // 3. Crisp white center highlight
+          ctx.fillStyle = `rgba(255, 255, 255, ${fadeAlpha * 0.9})`;
+          ctx.beginPath();
+          ctx.arc(simX, simY, dotRadius * 0.45, 0, Math.PI * 2);
           ctx.fill();
         }
+
+        // Animated Trajectory Endpoint / Impact Reticle
+        const reticlePulse = 1 + Math.sin(state.time * 8) * 0.25;
+        ctx.save();
+        ctx.translate(endX, Math.min(groundY, endY));
+
+        // Dark back ring
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.75)';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.arc(0, 0, 10 * reticlePulse, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Bright golden target ring
+        ctx.strokeStyle = '#facc15';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(0, 0, 10 * reticlePulse, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Cross lines
+        ctx.strokeStyle = '#facc15';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(-5, 0);
+        ctx.lineTo(5, 0);
+        ctx.moveTo(0, -5);
+        ctx.lineTo(0, 5);
+        ctx.stroke();
+
+        ctx.restore();
       }
 
-      // --- Draw Archer & Bow Rig ---
+      // --- Draw Archer & Bow Rig with Dynamic Limb Flex and String Snap ---
       const bowX = state.bowX;
       const bowY = state.bowY;
       const tension = state.isPulling ? state.pullTension : 0;
       const bowAngle = state.isPulling ? state.aimAngle : -0.1;
 
+      // Micro tremble at extreme draw tension (>85%)
+      const tensionTremble = tension > 0.85 ? (Math.random() - 0.5) * 1.5 : 0;
+
       ctx.save();
-      ctx.translate(bowX, bowY);
+      ctx.translate(bowX, bowY + tensionTremble);
       ctx.rotate(bowAngle);
 
-      // Bow Limbs (Recurve curve)
-      const bowRadius = 55;
-      const drawPullX = -tension * 40; // string pulls back along local X
+      // Bow Limbs bend back deeper as tension increases!
+      const baseBowRadius = 60;
+      const limbFlex = tension * 16; // tips pull slightly inward/back
+      const limbTipX = -limbFlex;
+      const limbTipY = baseBowRadius - limbFlex * 0.3;
 
-      // Top Limb
-      ctx.strokeStyle = '#78350f';
-      ctx.lineWidth = 6;
+      // Bowstring snapback oscillation
+      const stringSnapOffset = state.stringVibration > 0
+        ? Math.sin(state.stringVibPhase) * state.stringVibration * 12
+        : 0;
+
+      const drawPullX = state.isPulling ? -tension * 45 : stringSnapOffset;
+
+      // Shadow behind bow
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.35)';
+      ctx.shadowBlur = 6;
+      ctx.shadowOffsetY = 3;
+
+      // Top Limb (Wood recurve)
+      ctx.strokeStyle = '#572b0c';
+      ctx.lineWidth = 7;
       ctx.lineCap = 'round';
       ctx.beginPath();
       ctx.moveTo(0, 0);
-      ctx.quadraticCurveTo(bowRadius * 0.45, -bowRadius * 0.5, 5, -bowRadius);
+      ctx.quadraticCurveTo(baseBowRadius * 0.45 - limbFlex * 0.5, -baseBowRadius * 0.5, limbTipX, -limbTipY);
+      ctx.stroke();
+
+      // Top Limb Belly Highlight (Warm amber strip)
+      ctx.strokeStyle = '#b45309';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.quadraticCurveTo(baseBowRadius * 0.45 - limbFlex * 0.5, -baseBowRadius * 0.5, limbTipX + 1, -limbTipY + 4);
       ctx.stroke();
 
       // Bottom Limb
+      ctx.strokeStyle = '#572b0c';
+      ctx.lineWidth = 7;
       ctx.beginPath();
       ctx.moveTo(0, 0);
-      ctx.quadraticCurveTo(bowRadius * 0.45, bowRadius * 0.5, 5, bowRadius);
+      ctx.quadraticCurveTo(baseBowRadius * 0.45 - limbFlex * 0.5, baseBowRadius * 0.5, limbTipX, limbTipY);
       ctx.stroke();
 
-      // Gold Limb Tip Reinforcements
+      // Bottom Limb Highlight
+      ctx.strokeStyle = '#b45309';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.quadraticCurveTo(baseBowRadius * 0.45 - limbFlex * 0.5, baseBowRadius * 0.5, limbTipX + 1, limbTipY - 4);
+      ctx.stroke();
+
+      // Golden Limb Tips (Nocks for bowstring)
       ctx.strokeStyle = '#f59e0b';
-      ctx.lineWidth = 4;
+      ctx.lineWidth = 4.5;
       ctx.beginPath();
-      ctx.moveTo(2, -bowRadius + 8);
-      ctx.lineTo(5, -bowRadius);
-      ctx.moveTo(2, bowRadius - 8);
-      ctx.lineTo(5, bowRadius);
+      ctx.moveTo(limbTipX - 2, -limbTipY + 8);
+      ctx.lineTo(limbTipX, -limbTipY);
+      ctx.moveTo(limbTipX - 2, limbTipY - 8);
+      ctx.lineTo(limbTipX, limbTipY);
       ctx.stroke();
 
-      // Grip Handle (Leather wrap)
-      ctx.strokeStyle = '#1c1917';
-      ctx.lineWidth = 8;
+      // Leather Bow Grip Handle
+      ctx.strokeStyle = '#18181b';
+      ctx.lineWidth = 9.5;
       ctx.beginPath();
-      ctx.moveTo(0, -12);
-      ctx.lineTo(0, 12);
+      ctx.moveTo(0, -14);
+      ctx.lineTo(0, 14);
       ctx.stroke();
 
-      // Bowstring
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 1.8;
-      ctx.beginPath();
-      ctx.moveTo(5, -bowRadius);
-      ctx.lineTo(drawPullX, 0); // Knock point pulled back
-      ctx.lineTo(5, bowRadius);
-      ctx.stroke();
+      // Golden Arrow Shelf
+      ctx.fillStyle = '#fbbf24';
+      ctx.fillRect(-2, -4, 5, 8);
 
-      // Nocked Arrow on String (when drawing or ready to shoot)
+      // Bowstring (Vivid White with slight glow)
+      ctx.shadowBlur = 2;
+      ctx.shadowColor = '#ffffff';
+      ctx.strokeStyle = '#f8fafc';
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      ctx.moveTo(limbTipX, -limbTipY);
+      ctx.lineTo(drawPullX, 0);
+      ctx.lineTo(limbTipX, limbTipY);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+
+      // Nocked Arrow on String (when drawing or waiting to shoot)
       if (arrowsRemaining > 0 && !state.activeArrow) {
         ctx.save();
-        ctx.translate(drawPullX, 0);
-
-        // Arrow Shaft
-        ctx.strokeStyle = '#d97706';
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.moveTo(0, 0);
-        ctx.lineTo(54, 0);
-        ctx.stroke();
-
-        // Tip
-        ctx.fillStyle = '#94a3b8';
-        ctx.beginPath();
-        ctx.moveTo(54, 0);
-        ctx.lineTo(44, -3);
-        ctx.lineTo(44, 3);
-        ctx.closePath();
-        ctx.fill();
-
-        // Feathers
-        ctx.fillStyle = '#ef4444';
-        ctx.fillRect(-10, -5, 10, 4);
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(-10, 1, 10, 4);
-
+        ctx.translate(drawPullX + 76 - 15, 0);
+        drawArrowObject(76, false, 0);
         ctx.restore();
       }
 
@@ -1115,26 +1317,34 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
       if (state.isPulling) {
         ctx.save();
         ctx.translate(bowX, bowY);
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
-        ctx.lineWidth = 5;
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.4)';
+        ctx.lineWidth = 7;
         ctx.beginPath();
-        ctx.arc(0, 0, 75, -Math.PI * 0.7, Math.PI * 0.7);
+        ctx.arc(0, 0, 80, -Math.PI * 0.7, Math.PI * 0.7);
         ctx.stroke();
 
-        // Filled power arc
-        const powerColor = tension > 0.8 ? '#ef4444' : tension > 0.5 ? '#eab308' : '#22c55e';
-        ctx.strokeStyle = powerColor;
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
         ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.arc(0, 0, 80, -Math.PI * 0.7, Math.PI * 0.7);
+        ctx.stroke();
+
+        const powerColor = tension > 0.8 ? '#ef4444' : tension > 0.5 ? '#f59e0b' : '#10b981';
+        ctx.strokeStyle = powerColor;
+        ctx.lineWidth = 6;
+        ctx.lineCap = 'round';
         ctx.beginPath();
         const startA = -Math.PI * 0.5;
-        ctx.arc(0, 0, 75, startA, startA + tension * Math.PI, false);
+        ctx.arc(0, 0, 80, startA, startA + tension * Math.PI, false);
         ctx.stroke();
 
-        // Tension text
-        ctx.fillStyle = powerColor;
-        ctx.font = 'bold 12px sans-serif';
+        ctx.fillStyle = '#0f172a';
+        ctx.font = '900 13px system-ui, sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText(`${Math.round(tension * 100)}%`, 0, -85);
+        ctx.fillText(`${Math.round(tension * 100)}%`, 0, -90);
+
+        ctx.fillStyle = powerColor;
+        ctx.fillText(`${Math.round(tension * 100)}%`, 0, -91);
 
         ctx.restore();
       }
@@ -1149,7 +1359,7 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
 
         if (p.shape === 'spark') {
           ctx.beginPath();
-          ctx.arc(p.x, p.y, p.radius * (1 - progress * 0.5), 0, Math.PI * 2);
+          ctx.arc(p.x, p.y, p.radius * (1 - progress * 0.4), 0, Math.PI * 2);
           ctx.fill();
         } else if (p.shape === 'splinter') {
           ctx.translate(p.x, p.y);
@@ -1163,32 +1373,36 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
         ctx.restore();
       });
 
-      // --- Draw Floating Score Texts ---
+      // --- Draw Floating Score Texts (with Bouncy Punch Animation) ---
       state.floatingTexts.forEach((t) => {
         const progress = t.life / t.maxLife;
         const alpha = Math.max(0, 1 - progress);
+        // Spring punch scale on spawn
+        const scale = progress < 0.2 ? 1 + (0.2 - progress) * 1.5 : 1;
+
         ctx.save();
+        ctx.translate(t.x, t.y);
+        ctx.scale(scale, scale);
         ctx.globalAlpha = alpha;
         ctx.textAlign = 'center';
         ctx.font = `900 ${t.size}px system-ui, -apple-system, sans-serif`;
 
-        // Dark text outline for readability
-        ctx.strokeStyle = '#000000';
-        ctx.lineWidth = 4;
-        ctx.strokeText(t.text, t.x, t.y);
+        // Heavy dark text outline for instant contrast
+        ctx.strokeStyle = '#020617';
+        ctx.lineWidth = 5;
+        ctx.strokeText(t.text, 0, 0);
 
         // Fill color
         ctx.fillStyle = t.color;
-        ctx.fillText(t.text, t.x, t.y);
+        ctx.fillText(t.text, 0, 0);
 
-        // Subtext (like combo info)
         if (t.subText) {
-          ctx.font = 'bold 14px system-ui, -apple-system, sans-serif';
+          ctx.font = 'bold 15px system-ui, -apple-system, sans-serif';
           ctx.fillStyle = '#fef08a';
-          ctx.strokeStyle = '#000000';
-          ctx.lineWidth = 3;
-          ctx.strokeText(t.subText, t.x, t.y + 22);
-          ctx.fillText(t.subText, t.x, t.y + 22);
+          ctx.strokeStyle = '#020617';
+          ctx.lineWidth = 3.5;
+          ctx.strokeText(t.subText, 0, 24);
+          ctx.fillText(t.subText, 0, 24);
         }
         ctx.restore();
       });
@@ -1220,7 +1434,7 @@ export const ArcheryCanvas: React.FC<ArcheryCanvasProps> = ({
 
       {/* Touch / Drag instructional prompt when idle and arrows remaining */}
       {arrowsRemaining > 0 && (
-        <div className="absolute bottom-4 left-6 pointer-events-none text-white/90 drop-shadow-md text-xs sm:text-sm font-medium flex items-center gap-2 bg-black/40 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-white/10">
+        <div className="absolute bottom-4 left-6 pointer-events-none text-white/90 drop-shadow-md text-xs sm:text-sm font-medium flex items-center gap-2 bg-black/50 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-white/10">
           <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
           <span>Click &amp; pull back the bow to aim and shoot</span>
         </div>

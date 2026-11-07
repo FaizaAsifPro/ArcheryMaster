@@ -73,6 +73,9 @@ export interface Arrow {
   stuckTargetId?: string; // target it attached to
   stuckOffset?: { x: number; y: number }; // relative offset to target center
   trail: { x: number; y: number; alpha: number }[];
+  quiverAmount?: number; // vibration amount when stuck
+  quiverSpeed?: number;
+  quiverPhase?: number;
 }
 
 export interface Target {
@@ -87,6 +90,20 @@ export interface Target {
   type: 'standard' | 'balloon' | 'apple';
   pointsMultiplier: number;
   active: boolean;
+  recoilX?: number; // horizontal impact knockback
+  recoilAngle?: number; // tilt impact angle
+  recoilVelocity?: number;
+}
+
+export interface Shockwave {
+  id: number;
+  x: number;
+  y: number;
+  radius: number;
+  maxRadius: number;
+  color: string;
+  life: number;
+  maxLife: number;
 }
 
 export interface Particle {
